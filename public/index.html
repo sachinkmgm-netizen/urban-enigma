@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FPL Insights</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 720px;
+      margin: 48px auto;
+      padding: 0 16px;
+      color: #1a1a1a;
+    }
+    h1 { font-size: 1.4rem; margin-bottom: 4px; }
+    h2 { font-size: 1.05rem; margin-top: 36px; margin-bottom: 4px; color: #37003c; }
+    p.tagline { color: #555; margin-top: 0; }
+    p.section-note { color: #777; font-size: 0.85rem; margin-top: 0; margin-bottom: 8px; }
+    #refresh-btn {
+      padding: 10px 20px;
+      font-size: 1rem;
+      border-radius: 6px;
+      border: none;
+      background: #37003c;
+      color: white;
+      cursor: pointer;
+    }
+    #refresh-btn:disabled { background: #999; cursor: not-allowed; }
+    #status { margin-top: 12px; font-size: 0.9rem; color: #555; }
+    #error { color: #b00020; margin-top: 8px; font-size: 0.9rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; margin-top: 4px; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #e8e8e8; }
+    th { background: #f5f3f6; color: #37003c; font-weight: 600; }
+    td.num, th.num { text-align: right; }
+    .muted { color: #888; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <h1>FPL Insights</h1>
+  <p class="tagline">Shared data, no login needed. Refresh before making transfer decisions to pull the latest prices, ownership, and stats.</p>
+
+  <button id="refresh-btn">Refresh data</button>
+  <div id="status">Checking last refresh…</div>
+  <div id="error"></div>
+
+  <h2>Top differentials</h2>
+  <p class="section-note">Low ownership, weighted toward players who look under-rewarded right now — see the app notes for how this score is built.</p>
+  <div id="differentials-table">Loading…</div>
+
+  <h2>DEFCON hit rate</h2>
+  <p class="section-note">How often a defender/midfielder/forward actually clears their position's defensive-contribution threshold (min. 3 appearances).</p>
+  <div id="defcon-table">Loading…</div>
+
+  <h2>Fixture swing</h2>
+  <p class="section-note">Average upcoming fixture difficulty per team (1 = easiest, 5 = hardest). Sorted by the next 5 gameweeks.</p>
+  <div id="fixture-table">Loading…</div>
+
+  <script type="module">
+    import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+    // Anon key here has full read/write access by design (see
+    // fpl_insights_schema_v1.sql, section 13) — this page only
+    // ever reads with it.
+    const SUPABASE_URL = 'https://YOUR-PROJECT.supabase.co';
+    const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
+
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    const POSITION_LABELS = { 1: 'GKP', 2: 'DEF', 3: 'MID', 4: 'FWD' };
+    let teamsById = {};
+
+    const btn = document.getElementById('refresh-btn');
+    const statusEl = document.getElementById('status');
+    const errorEl = document.getElementById('error');
+
+    const COOLDOWN_MS = 2 * 60 * 1000;
+
+    function formatTime(iso) {
+      if (!iso) return 'never';
+      return new Date(iso).toLocaleString();
+    }
+
+    function formatPrice(nowCost) {
+      return `£${(Number(nowCost) / 10).toFixed(1)}m`;
+    }
+
+    function teamShortName(teamId) {
+      return teamsById[teamId] || '—';
+    }
+
+    function setCooldown(lastStartedAtIso) {
+      if (!lastStartedAtIso) return;
+      const elapsed = Date.now() - new Date(lastStartedAtIso).getTime();
+      const remaining = COOLDOWN_MS - elapsed;
+      if (remaining <= 0) return;
+
+      btn.disabled = true;
+      const remainingSeconds = Math.ceil(remaining / 1000);
+      btn.textContent = `Refresh available in ${remainingSeconds}s`;
+
+      setTimeout(() => {
+        btn.disabled = false;
+        btn.textContent = 'Refresh data';
+      }, remaining);
+    }
+
+    async function loadStatus() {
+      const { data, error } = await supabase
+        .from('sync_status')
+        .select('last_started_at, last_finished_at, players_synced')
+        .eq('job', 'fast')
+        .maybeSingle();
+
+      if (error) {
+        statusEl.textContent = 'Could not load refresh status.';
+        return;
+      }
+
+      if (!data) {
+        statusEl.textContent = 'Data has never been refreshed yet.';
+        return;
+      }
+
+      statusEl.textContent = `Last refreshed: ${formatTime(data.last_finished_at)}` +
+        (data.players_synced ? ` (${data.players_synced} players)` : '');
+
+      setCooldown(data.last_started_at);
+    }
+
+    // --- Insight tables ---
+
+    function renderTable(containerId, columns, rows) {
+      const container = document.getElementById(containerId);
+      if (!rows || rows.length === 0) {
+        container.innerHTML = '<p class="muted">No data yet — run a refresh, and make sure the history sync has run at least once.</p>';
+        return;
+      }
+
+      const head = `<tr>${columns.map((c) => `<th class="${c.num ? 'num' : ''}">${c.label}</th>`).join('')}</tr>`;
+      const body = rows.map((row) => {
+        const cells = columns.map((c) => `<td class="${c.num ? 'num' : ''}">${c.render(row)}</td>`).join('');
+        return `<tr>${cells}</tr>`;
+      }).join('');
+
+      container.innerHTML = `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+    }
+
+    async function loadTeams() {
+      const { data, error } = await supabase.from('teams').select('id, short_name');
+      if (error) return;
+      teamsById = Object.fromEntries(data.map((t) => [t.id, t.short_name]));
+    }
+
+    async function loadDifferentials() {
+      const { data, error } = await supabase
+        .from('mv_differential_score')
+        .select('player_id, web_name, team_id, element_type, now_cost, selected_by_percent, differential_score')
+        .order('differential_score', { ascending: false })
+        .limit(25);
+
+      if (error) {
+        document.getElementById('differentials-table').innerHTML = '<p class="muted">Could not load.</p>';
+        return;
+      }
+
+      renderTable('differentials-table', [
+        { label: 'Player', render: (r) => r.web_name },
+        { label: 'Team', render: (r) => teamShortName(r.team_id) },
+        { label: 'Pos', render: (r) => POSITION_LABELS[r.element_type] || '—' },
+        { label: 'Price', num: true, render: (r) => formatPrice(r.now_cost) },
+        { label: 'Owned', num: true, render: (r) => `${Number(r.selected_by_percent).toFixed(1)}%` },
+        { label: 'Score', num: true, render: (r) => Math.round(Number(r.differential_score) * 100) }
+      ], data);
+    }
+
+    async function loadDefcon() {
+      const { data, error } = await supabase
+        .from('mv_defcon_hit_rate')
+        .select('player_id, web_name, team_id, element_type, now_cost, hit_rate, avg_actions_per_appearance, appearances')
+        .gte('appearances', 3)
+        .order('hit_rate', { ascending: false })
+        .limit(25);
+
+      if (error) {
+        document.getElementById('defcon-table').innerHTML = '<p class="muted">Could not load.</p>';
+        return;
+      }
+
+      renderTable('defcon-table', [
+        { label: 'Player', render: (r) => r.web_name },
+        { label: 'Team', render: (r) => teamShortName(r.team_id) },
+        { label: 'Pos', render: (r) => POSITION_LABELS[r.element_type] || '—' },
+        { label: 'Price', num: true, render: (r) => formatPrice(r.now_cost) },
+        { label: 'Hit rate', num: true, render: (r) => `${Math.round(Number(r.hit_rate) * 100)}%` },
+        { label: 'Avg actions', num: true, render: (r) => Number(r.avg_actions_per_appearance).toFixed(1) },
+        { label: 'Apps', num: true, render: (r) => r.appearances }
+      ], data);
+    }
+
+    async function loadFixtureSwing() {
+      const { data, error } = await supabase
+        .from('mv_fixture_swing')
+        .select('team_id, avg_difficulty_next_3, avg_difficulty_next_5, avg_difficulty_next_8')
+        .order('avg_difficulty_next_5', { ascending: true });
+
+      if (error) {
+        document.getElementById('fixture-table').innerHTML = '<p class="muted">Could not load.</p>';
+        return;
+      }
+
+      renderTable('fixture-table', [
+        { label: 'Team', render: (r) => teamShortName(r.team_id) },
+        { label: 'Next 3', num: true, render: (r) => Number(r.avg_difficulty_next_3).toFixed(1) },
+        { label: 'Next 5', num: true, render: (r) => Number(r.avg_difficulty_next_5).toFixed(1) },
+        { label: 'Next 8', num: true, render: (r) => Number(r.avg_difficulty_next_8).toFixed(1) }
+      ], data);
+    }
+
+    async function loadInsights() {
+      await loadTeams();
+      await Promise.all([loadDifferentials(), loadDefcon(), loadFixtureSwing()]);
+    }
+
+    // --- Refresh button ---
+
+    async function refresh() {
+      btn.disabled = true;
+      errorEl.textContent = '';
+      statusEl.textContent = 'Refreshing…';
+
+      try {
+        const res = await fetch('/api/refresh-fast', { method: 'POST' });
+        const body = await res.json();
+
+        if (res.status === 429) {
+          errorEl.textContent = `Refreshed too recently, try again in ${body.retryAfterSeconds}s.`;
+          await loadStatus();
+          return;
+        }
+
+        if (!res.ok) {
+          errorEl.textContent = body.error || 'Refresh failed.';
+          btn.disabled = false;
+          btn.textContent = 'Refresh data';
+          return;
+        }
+
+        if (body.viewRefreshWarning) {
+          errorEl.textContent = `Synced, but insight views may be stale: ${body.viewRefreshWarning}`;
+        }
+
+        statusEl.textContent = `Last refreshed: ${formatTime(body.finishedAt)} (${body.playersSynced} players)`;
+        setCooldown(new Date().toISOString());
+        await loadInsights(); // reflect the newly-refreshed views, not just the status line
+      } catch (err) {
+        errorEl.textContent = 'Refresh failed: ' + err.message;
+        btn.disabled = false;
+        btn.textContent = 'Refresh data';
+      }
+    }
+
+    btn.addEventListener('click', refresh);
+    loadStatus();
+    loadInsights();
+  </script>
+</body>
+</html>
