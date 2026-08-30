@@ -1,0 +1,22 @@
+{
+  "name": "fpl-insights-app",
+  "version": "1.0.0",
+  "description": "Netlify + Supabase FPL insights app — button-triggered refresh, scheduled history backfill",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "sync:bootstrap": "node src/index.js bootstrap",
+    "sync:fixtures": "node src/index.js fixtures",
+    "sync:snapshot": "node src/index.js snapshot",
+    "sync:history": "node src/index.js history",
+    "sync:all": "node src/index.js all",
+    "smoke-test": "SUPABASE_URL=http://localhost:54321 SUPABASE_SERVICE_ROLE_KEY=test-key node scripts/smoke-test.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
