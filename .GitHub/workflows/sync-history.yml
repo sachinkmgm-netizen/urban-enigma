@@ -1,0 +1,22 @@
+name: FPL Insights — history sync
+
+on:
+  schedule:
+    # Once daily — safe even though it's only strictly needed
+    # after a gameweek finishes, since the upsert is idempotent.
+    - cron: '0 6 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: node src/index.js history
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
